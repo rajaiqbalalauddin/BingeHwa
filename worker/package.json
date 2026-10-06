@@ -1,0 +1,14 @@
+{
+  "name": "bingehwa-chapter-worker",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "start": "node src/run.mjs",
+    "dry-run": "node src/run.mjs --dry-run",
+    "test": "node --test"
+  },
+  "dependencies": {
+    "firebase-admin": "^12.7.0"
+  }
+}

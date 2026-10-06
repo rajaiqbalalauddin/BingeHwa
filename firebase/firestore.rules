@@ -1,0 +1,127 @@
+rules_version = '2';
+
+// Rules for BingeHwa. Every counter that clients touch (ratings, likes, replies, watchers)
+// is limited to a small, checkable step, so a bad client cannot jump a number by 1000.
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(uid) {
+      return signedIn() && request.auth.uid == uid;
+    }
+
+    function onlyChanges(keys) {
+      return request.resource.data.diff(resource.data).affectedKeys().hasOnly(keys);
+    }
+
+    // ---- series rating totals -------------------------------------------------------
+    function ratingDocExistsAfter(seriesId) {
+      return existsAfter(/databases/$(database)/documents/series/$(seriesId)/ratings/$(request.auth.uid));
+    }
+
+    match /series/{seriesId} {
+      allow read: if signedIn();
+
+      allow create: if signedIn()
+        && request.resource.data.keys().hasOnly(['ratingCount', 'ratingSum'])
+        && request.resource.data.ratingCount == 1
+        && request.resource.data.ratingSum >= 1
+        && request.resource.data.ratingSum <= 5
+        && ratingDocExistsAfter(seriesId);
+
+      allow update: if signedIn()
+        && onlyChanges(['ratingCount', 'ratingSum'])
+        && (request.resource.data.ratingCount - resource.data.ratingCount) in [0, 1]
+        && (request.resource.data.ratingSum - resource.data.ratingSum) >= -4
+        && (request.resource.data.ratingSum - resource.data.ratingSum) <= 5
+        && ratingDocExistsAfter(seriesId);
+
+      function validRating() {
+        let d = request.resource.data;
+        return d.keys().hasOnly(['uid', 'name', 'stars', 'tags', 'review', 'public', 'updatedAt'])
+          && d.uid == request.auth.uid
+          && d.stars is int && d.stars >= 1 && d.stars <= 5
+          && d.name is string && d.name.size() <= 30
+          && d.tags is list && d.tags.size() <= 6
+          && d.review is string && d.review.size() <= 400
+          && d.public is bool
+          && d.updatedAt == request.time;
+      }
+
+      match /ratings/{uid} {
+        allow read: if signedIn() && (resource.data.public == true || request.auth.uid == uid);
+        allow create, update: if isOwner(uid) && validRating();
+        allow delete: if isOwner(uid);
+      }
+    }
+
+    // ---- comments -------------------------------------------------------------------
+    function validComment() {
+      let d = request.resource.data;
+      return d.keys().hasOnly(['scope', 'seriesId', 'chapterId', 'parentId', 'uid', 'name', 'text', 'spoiler', 'likeCount', 'replyCount', 'createdAt'])
+        && d.uid == request.auth.uid
+        && d.scope is string && d.seriesId is string && d.chapterId is string && d.parentId is string
+        && d.text is string && d.text.size() >= 1 && d.text.size() <= 1000
+        && d.name is string && d.name.size() <= 30
+        && d.spoiler is bool
+        && d.likeCount == 0
+        && d.replyCount == 0
+        && d.createdAt == request.time;
+    }
+
+    function likeExistsAfter(commentId) {
+      return existsAfter(/databases/$(database)/documents/comments/$(commentId)/likes/$(request.auth.uid));
+    }
+
+    match /comments/{commentId} {
+      allow read: if signedIn();
+      allow create: if signedIn() && validComment();
+      allow delete: if signedIn() && resource.data.uid == request.auth.uid;
+
+      allow update: if signedIn() && (
+        (onlyChanges(['likeCount'])
+          && (
+            ((request.resource.data.likeCount - resource.data.likeCount) == 1 && likeExistsAfter(commentId))
+            || ((request.resource.data.likeCount - resource.data.likeCount) == -1 && !likeExistsAfter(commentId))
+          ))
+        ||
+        (onlyChanges(['replyCount'])
+          && (request.resource.data.replyCount - resource.data.replyCount) == 1)
+      );
+
+      match /likes/{uid} {
+        allow read: if isOwner(uid);
+        allow create, delete: if isOwner(uid);
+      }
+    }
+
+    // ---- reports (write-only for clients) ----------------------------------------------
+    match /reports/{reportId} {
+      allow create: if signedIn()
+        && request.resource.data.keys().hasOnly(['commentId', 'uid', 'reason', 'createdAt'])
+        && request.resource.data.uid == request.auth.uid
+        && reportId == request.resource.data.commentId + '_' + request.auth.uid
+        && request.resource.data.reason is string && request.resource.data.reason.size() <= 200
+        && request.resource.data.createdAt == request.time;
+    }
+
+    // ---- watched series: the list the chapter worker reads ----------------------------
+    // The worker uses the Admin SDK (bypasses these rules) and adds its own fields.
+    match /watched/{seriesId} {
+      allow read: if signedIn();
+
+      allow create: if signedIn()
+        && request.resource.data.keys().hasOnly(['title', 'subscribers'])
+        && request.resource.data.subscribers == 1
+        && request.resource.data.title is string && request.resource.data.title.size() <= 120;
+
+      allow update: if signedIn()
+        && onlyChanges(['subscribers'])
+        && request.resource.data.subscribers >= 0
+        && (request.resource.data.subscribers - resource.data.subscribers) in [-1, 0, 1];
+    }
+  }
+}
